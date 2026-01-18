@@ -255,7 +255,7 @@ class SimpleRAFTTracker:
         return tracked_points
 
 # -----------------------------------------------------------------------------
-# PIPsTracker (Added Nearest/SimpleRAFT robust logic)
+# PIPsTracker
 # -----------------------------------------------------------------------------
 class PIPsTracker:
     def __init__(self, device, model_path: Optional[str] = None, interpolation_method: str = 'cubic_spline'):
@@ -272,7 +272,7 @@ class PIPsTracker:
                 self.model = pips_core_model(stride=4)
                 print("[PIPS]  PIPS model initialized with original structure (weight-compatible)")
 
-                # Load pre-trained weights (keep original logic)
+                # Load pre-trained weights
                 weight_loaded = False
                 target_weight_name = "model-000200000.pth"
                 root_dir = os.path.dirname(os.path.dirname(__file__))  # DragGAN root
@@ -335,9 +335,9 @@ class PIPsTracker:
         points: List[List[float]],
         feat_ref: Optional[torch.Tensor] = None,
         feat_curr: Optional[torch.Tensor] = None,
-        # Add robust params (same as SimpleRAFT/Nearest)
-        min_move_threshold: float = 0.5,  # More sensitive, allow smaller moves
-        max_step: float = 8.0,
+        # Add robust params
+        min_move_threshold: float = 0.6,  # More sensitive, allow smaller moves
+        max_step: float = 5.0,
         target_points: Optional[List[List[float]]] = None,  # Optional direction validation
     ) -> List[List[float]]:
         if self.model is None:
@@ -397,6 +397,12 @@ class PIPsTracker:
                     step_y = pred_y - orig_y
                     step_x = pred_x - orig_x
                     step_norm = np.sqrt(step_y ** 2 + step_x ** 2)
+                    if target_points is not None and len(target_points) == len(points):
+                        tar_y, tar_x = target_points[idx]
+                        dist2target = np.sqrt((tar_y - orig_y)**2 + (tar_x - orig_x)**2)
+                        near_target_weight = np.exp(-dist2target / 25.0)
+                        step_y *= near_target_weight
+                        step_x *= near_target_weight
 
                     # Enhanced logic for smooth convergence:
                     # 1. If movement is very small, still allow it
@@ -410,7 +416,7 @@ class PIPsTracker:
                         step_x *= 0.3
                     # 3. If step is too large, cap it smoothly
                     elif step_norm > max_step and step_norm > 1e-6:
-                        step_scale = max_step / step_norm
+                        step_scale = (max_step / step_norm)
                         step_y *= step_scale
                         step_x *= step_scale
                     
@@ -509,8 +515,8 @@ class RAFTTracker:
         img_curr: torch.Tensor,
         points: List[List[float]],
         iters: int = 20,
-        min_move_threshold: float = 0.2,  # Lower: capture tiny valid movement
-        max_step: float = 12.0,           # Larger: match fast image deformation
+        min_move_threshold: float = 0.3,  # Lower: capture tiny valid movement
+        max_step: float = 6.0,           # Larger: match fast image deformation
         use_acceleration: bool = True,
         confidence_threshold: float = 0.15,
         target_points: Optional[List[List[float]]] = None,
@@ -542,13 +548,6 @@ class RAFTTracker:
                 flow_valid_mask = flow_magnitude > 0.1
                 flow_mean = float(flow_magnitude[flow_valid_mask].mean().item()) if flow_valid_mask.sum() > 0 else 0.0
 
-                # Texture quality map (gradient-based)
-                img_curr_np = img_curr[0].float().mean(dim=0).cpu().numpy()
-                dy_grad = np.abs(np.diff(img_curr_np, axis=0))
-                dx_grad = np.abs(np.diff(img_curr_np, axis=1))
-                texture_quality = np.pad(dy_grad, ((0,1),(0,0)), mode='edge') + np.pad(dx_grad, ((0,0),(0,1)), mode='edge')
-                texture_quality = np.clip(texture_quality / texture_quality.max(), 0.0, 1.0)
-
                 tracked_points = []
                 points_np = np.array(points, dtype=np.float32)
                 has_targets = target_points is not None and len(target_points) == len(points)
@@ -567,7 +566,6 @@ class RAFTTracker:
                     step_x = 0.0
                     step_y = 0.0
                 
-                
                     nearest_step_x = 0.0
                     nearest_step_y = 0.0
                     if feat_ref is not None and feat_curr is not None and step_norm_raft > min_move_threshold:
@@ -576,7 +574,6 @@ class RAFTTracker:
                         r = round(r2 / 512 * H)
                         py, px = int(orig_y), int(orig_x)
                         
-                    
                         if dy_raft > 0:
                             up = max(py, 0)
                             down = min(py + r + 1, H)
@@ -591,7 +588,6 @@ class RAFTTracker:
                             left = max(px - r, 0)
                             right = min(px + 1, W)
                         
-                        
                         feat_patch = feat_curr[:, :, up:down, left:right]
                         ref_feat = feat_ref[:, :, y_idx, x_idx].reshape(1,-1,1,1)
                         L2 = torch.linalg.norm(feat_patch - ref_feat, dim=1)
@@ -599,7 +595,6 @@ class RAFTTracker:
                         width = right - left
                         match_y = min_idx.item() // width + up
                         match_x = min_idx.item() % width + left
-                        
                         
                         nearest_step_y = match_y - orig_y
                         nearest_step_x = match_x - orig_x
@@ -624,12 +619,10 @@ class RAFTTracker:
                             if cos_sim > 0.0:
                                 # 1. Direction weight: weaker decay + high floor → preserve forward movement
                                 dir_weight = cos_sim * 0.8 + 0.2
-                                # 2. Texture weight: STRONG FLOOR (0.5) → no stuck in low-texture areas
-                                tex_weight = texture_quality[y_idx, x_idx] * 0.5 + 0.5
                                 # 3. Flow weight: looser upper bound → capture more valid flow
                                 flow_weight = min(flow_magnitude[y_idx, x_idx].item() / (flow_mean * 0.7 + 1e-8), 1.5)
-                                # 4. Global speed boost
-                                total_weight = dir_weight * tex_weight * flow_weight * 1.2
+                                # ✅ 去除纹理权重后，补偿系数保证速度一致 1.2 → 1.5
+                                total_weight = dir_weight * flow_weight * 1.5
 
                                 # Exponential decay: fast when far, slow when close
                                 dist_weight = np.exp(-target_norm / 60.0)  # 60 = decay rate (tuneable)
@@ -656,7 +649,6 @@ class RAFTTracker:
                                 if step_norm < 0.5:
                                     step_x *= 0.5
                                     step_y *= 0.5
-                        
                        
                         if feat_ref is not None and feat_curr is not None:
                             step_x = step_x * 0.6 + nearest_step_x * 0.4
@@ -682,8 +674,6 @@ class RAFTTracker:
                     y_clipped = np.clip(new_y, 0.0, float(H - 1))
                     x_clipped = np.clip(new_x, 0.0, float(W - 1))
                     tracked_points.append([y_clipped, x_clipped])
-                
-                
 
                 return tracked_points
                 
