@@ -31,11 +31,11 @@ run
 python scripts/download_model.py
 ```
 
-get RAFT weights from[google drive](https://drive.google.com/drive/folders/1sWDsfuZ3Up38EUQt7-JDTT1HcGHuJgvT)
-put it under .RAFT/models/
+get RAFT weights from  [google drive](https://drive.google.com/drive/folders/1sWDsfuZ3Up38EUQt7-JDTT1HcGHuJgvT)
+put it under ```.RAFT/models/```
 
-get PIPS weights from[Hugging Face](https://huggingface.co/aharley/pips/tree/main)
-the name of model is ```model-000200000.pth```,  put it under ./pips/checkpoint/
+get PIPS weights from  [Hugging Face](https://huggingface.co/aharley/pips/tree/main)
+the name of model is ```model-000200000.pth```,  put it under ```./pips/checkpoint/```
 
 ## run
 
